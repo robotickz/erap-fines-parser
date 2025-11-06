@@ -1,8 +1,10 @@
-fastapi
-uvicorn
-sqlalchemy
-pydantic
-pydantic-settings
+fastapi~=0.121.0
+uvicorn~=0.38.0
+sqlalchemy~=2.0.44
+pydantic~=2.12.4
+pydantic-settings~=2.11.0
 python-multipart
 pymupdf
 python-dotenv
+playwright~=1.55.0
+pynput
