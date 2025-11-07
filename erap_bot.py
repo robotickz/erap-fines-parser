@@ -3,17 +3,20 @@ import os
 import logging
 from pathlib import Path
 from typing import Optional
-from functools import partial
 
-import pyautogui
+from anthropic import Anthropic
 from playwright.async_api import async_playwright, Page, Browser
 from pydantic_settings import BaseSettings
 from pydantic import Field
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class ConfigDict(BaseSettings):
     base_url: str = Field(default="https://erap-public.kgp.kz/#/login")
     cert_password: str = Field(..., description="Certificate password for auto-input")
+    cert_path: str = Field(..., description="Path to certificate file")
 
     download_dir: Path = Field(default=Path("./downloads"))
     screenshot_dir: Path = Field(default=Path("./screenshots"))
@@ -22,9 +25,7 @@ class ConfigDict(BaseSettings):
     timeout: int = Field(default=60000)
 
     ncalayer_password_delay: float = Field(default=3.0, description="Delay before entering password (seconds)")
-    typing_interval: float = Field(default=0.1, description="Interval between keystrokes (seconds)")
-    click_before_type: bool = Field(default=True, description="Click window before typing (for macOS)")
-    use_typewrite_method: bool = Field(default=True, description="Use typewrite instead of write")
+    ncalayer_cert_select_delay: float = Field(default=2.0, description="Delay before certificate selection")
 
     class ConfigDict:
         env_file = ".env"
@@ -34,161 +35,139 @@ class ConfigDict(BaseSettings):
 logger = logging.getLogger(__name__)
 
 
-class NCALayerDialogAutomation:
-    """Автоматизация ввода пароля в NCALayer используя PyAutoGUI"""
+class ClaudeComputerUseAutomation:
+    """Автоматизация ввода пароля в NCALayer используя Claude Computer Use API"""
 
     def __init__(self, config: ConfigDict) -> None:
         self.config = config
-        self._check_pyautogui()
+        self.client = Anthropic(api_key=os.environ["CLAUDE_KEY"])
+        self.model = "claude-sonnet-4-5"
 
-    @staticmethod
-    def _check_pyautogui() -> bool:
-        """Проверка доступности PyAutoGUI и разрешений"""
-        try:
-            pyautogui.FAILSAFE = True
-            pyautogui.PAUSE = 0.1
-
-            # Тест работоспособности
-            pos = pyautogui.position()
-
-            if logger:
-                logger.info(f"✓ PyAutoGUI available (mouse at {pos})")
-
-            import platform
-            if platform.system() == 'Darwin':
-                logger.warning("⚠ macOS: Ensure Python has Accessibility permissions!")
-                logger.warning("   Settings → Privacy & Security → Accessibility")
-
-            return True
-        except Exception as e:
-            if logger:
-                logger.error(f"✗ PyAutoGUI error: {e}")
-            return False
-
-    async def enter_password(self, password: str) -> bool:
+    async def enter_password_and_select_cert(self) -> bool:
         """
-        Ввод пароля используя PyAutoGUI
-        Оптимизировано для macOS
+        Использует Claude Computer Use для:
+        1. Ввода пароля в NCALayer
+        2. Выбора сертификата
+        3. Нажатия "Қол қою"
         """
         try:
             if logger:
-                logger.info("⚙ Starting password input with PyAutoGUI...")
+                logger.info("⚙ Запуск автоматизации через Claude Computer Use...")
 
-            # Задержка для появления диалога
+            # Ждем появления диалога NCALayer
             await asyncio.sleep(self.config.ncalayer_password_delay)
 
-            # Клик в центр экрана для активации окна (для macOS)
-            if self.config.click_before_type:
-                screen_width, screen_height = pyautogui.size()
-                center_x, center_y = screen_width // 2, screen_height // 2
+            # Шаг 1: Ввод пароля
+            prompt_password = f"""На экране открыт диалог NCALayer для выбора сертификата и ввода пароля.
+            Пожалуйста, выполните следующие действия:
+            1. Найдите поле ввода пароля в окне NCALayer
+            2. Нажмите на это поле
+            3. Введите следующий пароль: {self.config.cert_password}
+            4. Выберите сертификат, его путь: {self.config.cert_path}, но только если поле пустое. Если там что-то заполнено, пропускай этот шаг.
+            4. Нажмите кнопку OK или нажмите Enter для подтверждения
+            
+            Убедитесь, что все действия выполнены корректно."""
 
-                click_func = partial(pyautogui.click, center_x, center_y)
-                await asyncio.to_thread(click_func)
-
-                if logger:
-                    logger.info(f"✓ Clicked at center ({center_x}, {center_y})")
-
-                await asyncio.sleep(0.5)
-
-            # Ввод пароля
-            if self.config.use_typewrite_method:
-                # Метод 1: typewrite (лучше для macOS)
-                for char in password:
-                    write_func = partial(pyautogui.typewrite, char, interval=self.config.typing_interval)
-                    await asyncio.to_thread(write_func)
-                if logger:
-                    logger.info("✓ Password entered (typewrite)")
-            else:
-                # Метод 2: write
-                write_func = partial(pyautogui.write, password, interval=self.config.typing_interval)
-                await asyncio.to_thread(write_func)
-                if logger:
-                    logger.info("✓ Password entered (write)")
-
-            # Задержка перед Enter
-            await asyncio.sleep(0.5)
-
-            # Нажатие Enter
-            press_func = partial(pyautogui.press, 'enter')
-            await asyncio.to_thread(press_func)
+            response = await asyncio.to_thread(
+                self.client.messages.create,
+                model=self.model,
+                max_tokens=1024,
+                extra_headers={
+                    "anthropic-beta": "computer-use-2025-01-24"
+                },
+                tools=[
+                    {
+                        "type": "computer_20250124",
+                        "name": "computer",
+                        "display_width_px": 1920,
+                        "display_height_px": 1080
+                    },
+                    {
+                        "type": "bash_20250124",
+                        "name": "bash"
+                    },
+                    {
+                        "type": "text_editor_20250728",
+                        "name": "str_replace_based_edit_tool"
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt_password
+                    }
+                ]
+            )
 
             if logger:
-                logger.info("✓ Enter pressed (password dialog)")
+                logger.info("✓ Пароль введен через Claude Computer Use")
+
+            await asyncio.sleep(1)
+
+            # Шаг 2: Ожидание диалога выбора сертификата и нажатие Enter
+            await asyncio.sleep(self.config.ncalayer_cert_select_delay)
+
+            prompt_cert = f"""Теперь появилось второе окно NCALayer с заголовком "Кілтті таңдаңыз" (Выбор ключа).
+            В этом окне показан сертификат:
+            Иесі: ФИО
+            Жарамдылық мерзімі: некий срок
+            
+            Пожалуйста, выполните следующие действия:
+            1. Нажмите enter, поле станет темнее.
+            2. Затем нажмите tab и через секунду enter. Это автоматически активирует кнопку Подписать.
+            
+            Выполните эти действия последовательно."""
+
+            response = await asyncio.to_thread(
+                self.client.messages.create,
+                model=self.model,
+                max_tokens=1024,
+                extra_headers={
+                    "anthropic-beta": "computer-use-2025-01-24"
+                },
+                tools=[
+                    {
+                        "type": "computer_20250124",
+                        "name": "computer",
+                        "display_width_px": 1920,
+                        "display_height_px": 1080
+                    },
+                    {
+                        "type": "bash_20250124",
+                        "name": "bash"
+                    },
+                    {
+                        "type": "text_editor_20250728",
+                        "name": "str_replace_based_edit_tool"
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt_cert
+                    }
+                ]
+            )
+
+            if logger:
+                logger.info("✓ Сертификат выбран и действия выполнены")
 
             return True
 
         except Exception as e:
             if logger:
-                logger.error(f"✗ PyAutoGUI error: {e}")
+                logger.error(f"✗ Ошибка Claude Computer Use: {e}")
             return False
 
-    @staticmethod
-    async def select_certificate_and_sign() -> bool:
-        """
-        Выбор сертификата и нажатие кнопки "Қол қою" во втором окне NCALayer
-        """
-        try:
-            if logger:
-                logger.info("⚙ Waiting for certificate selection dialog...")
 
-            # Ждем появления второго окна
-            await asyncio.sleep(2.0)
-
-            # Клик в центр экрана для выбора первого сертификата
-            screen_width, screen_height = pyautogui.size()
-            center_x, center_y = screen_width // 2, screen_height // 2
-
-            click_func = partial(pyautogui.click, center_x, center_y)
-            await asyncio.to_thread(click_func)
-
-            if logger:
-                logger.info(f"✓ Clicked on certificate at ({center_x}, {center_y})")
-
-            await asyncio.sleep(0.5)
-
-            # Нажатие Enter или Tab+Enter для кнопки "Қол қою"
-            press_func = partial(pyautogui.press, 'enter')
-            await asyncio.to_thread(press_func)
-
-            if logger:
-                logger.info("✓ Sign button pressed")
-
-            return True
-
-        except Exception as e:
-            if logger:
-                logger.error(f"✗ Certificate selection error: {e}")
-            return False
-
-    async def automate_password_input(self, password: str) -> bool:
-        """
-        Полная автоматизация: ввод пароля + выбор сертификата
-        """
-        if logger:
-            logger.info("Starting full NCALayer automation (password + certificate)...")
-
-        # Шаг 1: Ввод пароля в первом окне
-        if not await self.enter_password(password):
-            return False
-
-        # Шаг 2: Выбор сертификата и нажатие "Қол қою" во втором окне
-        if not await self.select_certificate_and_sign():
-            return False
-
-        if logger:
-            logger.info("✓ Full automation completed")
-
-        return True
-
-
-class ERAPBotWithAutomation:
-    """eRAP Bot с автоматизацией ввода пароля через PyAutoGUI"""
+class ERAPBotWithClaudeAutomation:
+    """eRAP Bot с автоматизацией через Claude Computer Use"""
 
     def __init__(self, config: ConfigDict):
         self.config = config
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
-        self.automation = NCALayerDialogAutomation(config)
+        self.automation = ClaudeComputerUseAutomation(config)
 
     async def initialize(self) -> None:
         try:
@@ -207,20 +186,20 @@ class ERAPBotWithAutomation:
             self.page.set_default_timeout(self.config.timeout)
 
             if logger:
-                logger.info("✓ Browser initialized")
+                logger.info("✓ Браузер инициализирован")
         except Exception as e:
             if logger:
-                logger.error(f"✗ Failed to initialize browser: {e}")
+                logger.error(f"✗ Ошибка инициализации браузера: {e}")
             raise
 
     async def authenticate_with_automation(self) -> bool:
         """
-        Аутентификация с автоматическим вводом пароля.
+        Аутентификация с автоматическим вводом пароля через Claude.
         Поддерживает русскую и казахскую версии сайта
         """
         try:
             if logger:
-                logger.info(f"Navigating to {self.config.base_url}")
+                logger.info(f"Переход на {self.config.base_url}")
 
             await self.page.goto(self.config.base_url, wait_until='domcontentloaded')
             await self.page.wait_for_load_state('networkidle')
@@ -242,19 +221,19 @@ class ERAPBotWithAutomation:
                     login_button = self.page.locator(selector).first
                     if await login_button.is_visible(timeout=3000):
                         if logger:
-                            logger.info(f"✓ Found login button: {selector}")
+                            logger.info(f"✓ Найдена кнопка входа: {selector}")
                         await login_button.click()
                         login_button_found = True
                         await asyncio.sleep(1.5)
                         break
                 except Exception as e:
                     if logger:
-                        logger.debug(f"Selector {selector} failed: {e}")
+                        logger.debug(f"Селектор {selector} не найден: {e}")
                     continue
 
             if not login_button_found:
                 if logger:
-                    logger.error("✗ Login button not found")
+                    logger.error("✗ Кнопка входа не найдена")
                 return False
 
             # ШАГ 2: Нажать кнопку "Выбрать сертификат"
@@ -275,45 +254,46 @@ class ERAPBotWithAutomation:
                     cert_button = self.page.locator(selector).first
                     if await cert_button.is_visible(timeout=3000):
                         if logger:
-                            logger.info(f"✓ Found certificate button: {selector}")
+                            logger.info(f"✓ Найдена кнопка сертификата: {selector}")
                         await cert_button.click()
                         cert_button_found = True
                         await asyncio.sleep(1)
                         break
                 except Exception as e:
                     if logger:
-                        logger.debug(f"Selector {selector} failed: {e}")
+                        logger.debug(f"Селектор {selector} не найден: {e}")
                     continue
 
             if not cert_button_found:
                 if logger:
-                    logger.error("✗ Certificate button not found")
+                    logger.error("✗ Кнопка сертификата не найдена")
                 try:
                     screenshot_path = self.config.screenshot_dir / "cert_button_not_found.png"
+                    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
                     await self.page.screenshot(path=str(screenshot_path))
                     if logger:
-                        logger.info(f"Screenshot saved: {screenshot_path}")
+                        logger.info(f"Скриншот сохранен: {screenshot_path}")
                 except:
                     pass
                 return False
 
-            # ШАГ 3: Запустить автоматизацию ввода пароля в NCALayer
+            # ШАГ 3: Запустить автоматизацию ввода пароля и выбора сертификата через Claude
             if logger:
-                logger.info("⚙ Starting NCALayer password automation...")
+                logger.info("⚙ Запуск автоматизации Claude Computer Use...")
 
             automation_task = asyncio.create_task(
-                self.automation.automate_password_input(self.config.cert_password)
+                self.automation.enter_password_and_select_cert()
             )
 
-            # Ждем успешной авторизации
+            # Ждем успешной аутентификации
             try:
                 await asyncio.sleep(3)
 
                 # Проверяем изменение URL
-                for _ in range(15):
+                for i in range(20):
                     current_url = self.page.url
                     if logger:
-                        logger.info(f"Current URL: {current_url}")
+                        logger.info(f"Текущий URL ({i+1}/20): {current_url}")
 
                     if ('personal' in current_url.lower() or
                             'cabinet' in current_url.lower() or
@@ -322,7 +302,7 @@ class ERAPBotWithAutomation:
                             ('login' not in current_url.lower() and current_url != self.config.base_url)):
 
                         if logger:
-                            logger.info("✓ Authentication successful - URL changed!")
+                            logger.info("✓ Аутентификация успешна - URL изменился!")
                         automation_task.cancel()
                         return True
 
@@ -333,23 +313,23 @@ class ERAPBotWithAutomation:
                     automation_success = await automation_task
                     if automation_success:
                         if logger:
-                            logger.info("✓ Password automation completed")
+                            logger.info("✓ Автоматизация Claude завершена")
                         await asyncio.sleep(3)
                         current_url = self.page.url
                         if 'login' not in current_url.lower():
                             if logger:
-                                logger.info("✓ Authentication successful (delayed redirect)")
+                                logger.info("✓ Аутентификация успешна (отложенный редирект)")
                             return True
                 except asyncio.CancelledError:
                     return True
 
                 if logger:
-                    logger.error("✗ Authentication failed - URL did not change")
+                    logger.error("✗ Аутентификация не удалась - URL не изменился")
                 return False
 
             except Exception as e:
                 if logger:
-                    logger.error(f"✗ Authentication error: {e}")
+                    logger.error(f"✗ Ошибка аутентификации: {e}")
                 try:
                     automation_task.cancel()
                 except:
@@ -358,7 +338,7 @@ class ERAPBotWithAutomation:
 
         except Exception as e:
             if logger:
-                logger.error(f"✗ Error during authentication: {e}")
+                logger.error(f"✗ Ошибка во время аутентификации: {e}")
             return False
 
     async def run(self) -> bool | None:
@@ -369,13 +349,13 @@ class ERAPBotWithAutomation:
 
             if auth_result:
                 if logger:
-                    logger.info("Success")
+                    logger.info("✓ Успешно завершено")
                 result = True
             else:
                 result = False
         except Exception as e:
             if logger:
-                logger.error(f"✗ Error in run method: {e}")
+                logger.error(f"✗ Ошибка в методе run: {e}")
             result = False
         finally:
             if self.browser:
@@ -383,34 +363,39 @@ class ERAPBotWithAutomation:
                     await self.browser.close()
                 except Exception as e:
                     if logger:
-                        logger.error(f"✗ Error closing browser: {e}")
+                        logger.error(f"✗ Ошибка при закрытии браузера: {e}")
 
         return result
 
 
 async def main() -> int:
-    """Entry point"""
+    """Точка входа"""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
 
     try:
-        cert_password = os.getenv("CERT_PASSWORD", "Yeso2006")
+        cert_password = os.getenv("CERT_PASSWORD")
+        cert_path = os.getenv("CERT_PATH")
+
         if not cert_password:
-            raise ValueError("CERT_PASSWORD environment variable is not set")
-        config = ConfigDict(cert_password=cert_password)
+            raise ValueError("CERT_PASSWORD переменная окружения не установлена")
+        if not cert_path:
+            raise ValueError("CERT_PATH переменная окружения не установлена")
+
+        config = ConfigDict(cert_password=cert_password, cert_path=cert_path)
     except Exception as e:
-        print(f"Configuration error: {e}")
-        print("Ensure .env file has CERT_PASSWORD variable")
+        print(f"Ошибка конфигурации: {e}")
+        print("Убедитесь, что файл .env содержит переменные CERT_PASSWORD и CERT_PATH")
         return 1
 
     if logger:
         logger.info("=" * 70)
-        logger.info("eRAP Bot with PyAutoGUI Password Automation")
+        logger.info("eRAP Bot с Claude Computer Use API")
         logger.info("=" * 70)
 
-    bot = ERAPBotWithAutomation(config)
+    bot = ERAPBotWithClaudeAutomation(config)
     success = await bot.run()
 
     return 0 if success else 1
