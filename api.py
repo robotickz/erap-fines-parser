@@ -10,6 +10,7 @@ import logging
 from database_config import get_db
 from models import TrafficFine
 from pdf_parser import TrafficFinePDFParser
+from pdf_downloader import fetch_and_process_fines
 from schemas import UploadResponse, FineListResponse, FineResponse
 from security_layer import verify_token
 
@@ -47,7 +48,7 @@ async def health_check():
     response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(verify_token)],
-    tags=["Fines"]
+    tags=["Fines from PDF"]
 )
 async def upload_fine_pdf(
     file: UploadFile = File(..., description="PDF file with traffic fine"),
@@ -67,7 +68,6 @@ async def upload_fine_pdf(
     file_path = UPLOAD_DIR / f"{timestamp}_{file.filename}"
     
     try:
-        # Save uploaded file
         with open(file_path, "wb") as f:
             content = await file.read()
             f.write(content)
@@ -86,7 +86,6 @@ async def upload_fine_pdf(
         
         logger.info(f"Parsed data: {parsed_data.get('prescription_number')}")
         
-        # Check for duplicate
         existing = db.query(TrafficFine).filter(
             TrafficFine.prescription_number == parsed_data.get('prescription_number')
         ).first()
@@ -100,7 +99,6 @@ async def upload_fine_pdf(
                 prescription_number=str(existing.prescription_number)
             )
         
-        # Create database record
         fine = TrafficFine(**parsed_data)
         db.add(fine)
         db.commit()
@@ -131,7 +129,7 @@ async def upload_fine_pdf(
     "/fines",
     response_model=FineListResponse,
     dependencies=[Depends(verify_token)],
-    tags=["Fines"]
+    tags=["Fines from PDF"]
 )
 async def list_fines(
     license_plate: Optional[str] = Query(None, description="Filter by license plate"),
@@ -145,10 +143,7 @@ async def list_fines(
 ):
  
     
-    # Build query with filters
     query = db.query(TrafficFine)
-    
-    # Apply filters
     filters = []
     
     if license_plate:
@@ -172,12 +167,8 @@ async def list_fines(
     if filters:
         query = query.filter(and_(*filters))
     
-    # Get total count
-    total = query.count()
-    
-    # Apply pagination
+    total = query.count()    
     fines = query.order_by(TrafficFine.violation_datetime.desc()).offset(skip).limit(limit).all()
-    
     logger.info(f"Retrieved {len(fines)} fines (total: {total})")
     
     # Convert SQLAlchemy models to Pydantic models
@@ -192,7 +183,7 @@ async def list_fines(
     "/fines/{fine_id}",
     response_model=FineResponse,
     dependencies=[Depends(verify_token)],
-    tags=["Fines"]
+      tags=["Fines from PDF"]
 )
 async def get_fine(
     fine_id: int,
@@ -213,7 +204,7 @@ async def get_fine(
     "/fines/{fine_id}/mark-paid",
     response_model=FineResponse,
     dependencies=[Depends(verify_token)],
-    tags=["Fines"]
+      tags=["Fines from PDF"]
 )
 async def mark_fine_paid(
     fine_id: int,
@@ -234,6 +225,59 @@ async def mark_fine_paid(
     logger.info(f"Marked fine {fine_id} as paid")
     
     return FineResponse.model_validate(fine)
+
+@app.post(
+    "/fines/fetch",
+    response_model=UploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(verify_token)],
+    tags=["Fines from ERAP API"]
+)
+async def fetch_fines_from_erap(
+    plate_number: str,
+    tech_passport: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Загружает штрафы из системы eRAP по номеру автомобиля и паспорту ТС
+    """
+    try:
+        logger.info(f"Fetching fines for plate: {plate_number}, passport: {tech_passport}")
+        result = fetch_and_process_fines(plate_number, tech_passport, db)
+        
+        if result["success"]:
+            logger.info(f"Successfully fetched fines: {result['message']}")
+            
+            # Получаем первый сохраненный штраф для отображения в ответе
+            first_fine_id = result["saved_ids"][0] if result["saved_ids"] else None
+            first_prescription_number = None
+            
+            if first_fine_id:
+                first_fine = db.query(TrafficFine).filter(TrafficFine.id == first_fine_id).first()
+                if first_fine:
+                    first_prescription_number = first_fine.prescription_number
+            
+            return UploadResponse(
+                success=True,
+                message=result["message"],
+                fine_id=first_fine_id,
+                prescription_number=first_prescription_number
+            )
+        else:
+            logger.error(f"Failed to fetch fines: {result['message']}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result["message"]
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching fines from eRAP: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching fines: {str(e)}"
+        )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):

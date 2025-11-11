@@ -1,4 +1,4 @@
-import fitz  # PyMuPDF
+import fitz 
 import re
 from datetime import datetime
 from typing import Optional, Dict, Any

@@ -47,6 +47,7 @@ class TrafficFine(Base):
     issuing_department = Column(String(255))
     issuing_officer = Column(String(255))
     article_code = Column(String(20))  # КоАП article
+    pdf_url = Column(String(500))  # URL или путь к PDF файлу
     
     # Temporal tracking
     created_at = Column(DateTime, default=lambda: datetime.now(UTC))

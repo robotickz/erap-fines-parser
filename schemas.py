@@ -2,30 +2,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator
 from datetime import datetime
 from typing import Optional, List
 
-"""
-Schema Architecture Rationale:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Design Philosophy:
-1. Separation of Concerns: Request/Response/Internal schemas
-2. Type Safety: Leverage Pydantic v2 strict validation
-3. API Evolution: Separate DTOs allow backward compatibility
-4. Computed Fields: Expose business logic at schema level
-
-Trade-off Analysis:
-• Schema Duplication vs DRY:
-  - Accept slight duplication for cleaner API boundaries
-  - Each schema serves specific context (input/output/domain)
-  - Easier to evolve independently
-
-• Validation Strictness:
-  - Strict mode prevents coercion bugs
-  - Explicit validation rules for domain constraints
-  - Fail fast at API boundary
-"""
-
 class FineBase(BaseModel):
-    """Base schema with common fields - shared validation logic"""
     
     model_config = ConfigDict(
         from_attributes=True,
@@ -40,15 +17,7 @@ class FineBase(BaseModel):
     discounted_amount: float = Field(..., gt=0)
 
 class FineCreate(FineBase):
-    """
-    Input schema for fine creation
-    
-    Architecture Decision:
-    - All fields required at creation (strict validation)
-    - No computed fields (set by system)
-    - Explicit over implicit
-    """
-    
+
     vehicle_certificate: Optional[str] = None
     vehicle_make_model: Optional[str] = None
     vehicle_color: Optional[str] = None
@@ -88,14 +57,6 @@ class FineCreate(FineBase):
         return v
 
 class FineResponse(FineBase):
-    """
-    Output schema with computed fields
-    
-    Design Rationale:
-    - Include database ID for client-side tracking
-    - Add computed business logic fields
-    - Read-only metadata exposure
-    """
     
     id: int
     vehicle_certificate: Optional[str] = None
@@ -107,6 +68,7 @@ class FineResponse(FineBase):
     allowed_speed: Optional[float] = None
     owner_name: Optional[str] = None
     issuing_department: Optional[str] = None
+    pdf_url: Optional[str] = None
     created_at: datetime
     is_paid: bool
     
@@ -117,14 +79,6 @@ class FineResponse(FineBase):
     model_config = ConfigDict(from_attributes=True)
 
 class FineListResponse(BaseModel):
-    """
-    Paginated list response
-    
-    Architectural Pattern:
-    - Consistent pagination envelope
-    - Metadata for client state management
-    - Extensible for filtering metadata
-    """
     
     total: int = Field(..., description="Total records matching filters")
     items: List[FineResponse]
@@ -132,14 +86,6 @@ class FineListResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class FineFilterParams(BaseModel):
-    """
-    Query parameter schema for filtering
-    
-    Design Philosophy:
-    - Explicit optional parameters
-    - Type coercion handled by FastAPI
-    - Business logic validation
-    """
     
     license_plate: Optional[str] = Field(None, description="Filter by license plate")
     violation_date_from: Optional[datetime] = Field(

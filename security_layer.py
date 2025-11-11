@@ -13,10 +13,10 @@ class Settings(BaseSettings):
     """
     API_TOKEN: str
     
-    model_config = {
-        "env_file": ".env",
-        "case_sensitive": True
-    }
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+        extra = "ignore"  # Ignore extra fields from .env
 
 @lru_cache()
 def get_settings() -> Settings:
