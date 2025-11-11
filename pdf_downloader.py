@@ -4,8 +4,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from models import TrafficFine
+from pdf_parser import TrafficFinePDFParser
 
 fines_base_url = "https://erap-public.kgp.kz/psap/api/fine/"
 pdf_base_url = "https://erap-public.kgp.kz/psap/api/pdf/showpdf/av/"
@@ -67,7 +70,9 @@ def process_data(data: List[Dict], db_session):
         List[int]: Список ID созданных записей
     """
     saved_fine_ids = []
+    pdf_downloads = []
     
+    # Первый проход: проверяем существующие штрафы и готовим скачивание PDF
     for fine_data in data:
         try:
             existing_fine = db_session.query(TrafficFine).filter(
@@ -81,45 +86,133 @@ def process_data(data: List[Dict], db_session):
             pdf_url = f"{pdf_base_url}{fine_data.get('rid')}"
             pdf_path = download_pdf(pdf_url, fine_data.get('caseNumber'))
             
-            # Конвертируем даты
-            commit_date = None
-            if fine_data.get('commitDate'):
-                commit_date = datetime.fromisoformat(fine_data['commitDate'].replace('Z', '+00:00'))
-            
-            decision_date = None
-            if fine_data.get('decisionDate'):
-                decision_date = datetime.fromisoformat(fine_data['decisionDate'].replace('Z', '+00:00'))
-            
-            # Создаем запись о штрафе
-            penalty_size = fine_data.get('penaltySize', 0)
-            # Проверяем, что penalty_size не является пустой строкой или дефисом
-            if penalty_size in ('-', '', None):
-                penalty_size = 0
-            
-            new_fine = TrafficFine(
-                prescription_number=fine_data.get('caseNumber'),
-                license_plate="",  # Будет заполнено позже из запроса
-                violation_datetime=commit_date or datetime.now(),
-                fine_amount=float(penalty_size),
-                discounted_amount=float(penalty_size) * 0.5,  # 50% скидка
-                issuing_department=fine_data.get('organ', {}).get('nameRu', ''),
-                violation_description=fine_data.get('penaltyMeasure', {}).get('nameRu', ''),
-                is_paid=(fine_data.get('status') == 'Оплачен'),
-                pdf_url=pdf_path  # Сохраняем путь к PDF файлу
-            )
-            
-            db_session.add(new_fine)
-            db_session.flush()  # Получаем ID без коммита
-            saved_fine_ids.append(new_fine.id)
-            
-            logger.info(f"Saved fine with case number: {fine_data.get('caseNumber')}")
+            if pdf_path:
+                pdf_downloads.append({
+                    'fine_data': fine_data,
+                    'pdf_path': pdf_path,
+                    'pdf_url': pdf_url  # Сохраняем оригинальный URL
+                })
             
         except Exception as e:
-            logger.error(f"Error processing fine data: {str(e)}")
-            db_session.rollback()
-            raise
+            logger.error(f"Error preparing fine data: {str(e)}")
+            continue
+    
+    # Запускаем параллельный парсинг PDF файлов
+    if pdf_downloads:
+        logger.info(f"Starting parallel parsing of {len(pdf_downloads)} PDF files")
+        logger.debug(f"PDF downloads prepared: {[item['fine_data'].get('caseNumber') for item in pdf_downloads]}")
+        
+        # Используем последовательную обработку вместо параллельной из-за проблем с сессиями
+        for i, item in enumerate(pdf_downloads, 1):
+            try:
+                fine_id = parse_pdf_and_create_fine(item, db_session)
+                if fine_id:
+                    saved_fine_ids.append(fine_id)
+                    logger.info(f"[{i}/{len(pdf_downloads)}] Successfully processed fine: {item['fine_data'].get('caseNumber')}")
+                else:
+                    logger.warning(f"[{i}/{len(pdf_downloads)}] Failed to process fine: {item['fine_data'].get('caseNumber')}")
+            except Exception as e:
+                logger.error(f"[{i}/{len(pdf_downloads)}] Error processing PDF for {item['fine_data'].get('caseNumber')}: {str(e)}")
+        
+        logger.info(f"Processing completed. Successfully processed {len(saved_fine_ids)} out of {len(pdf_downloads)} files")
     
     return saved_fine_ids
+
+
+def parse_pdf_and_create_fine(item: Dict, db_session) -> Optional[int]:
+    """
+    Парсит PDF файл и создает запись о штрафе в базе данных
+    
+    Args:
+        item: Словарь с данными о штрафе и путем к PDF
+        db_session: Сессия базы данных
+        
+    Returns:
+        Optional[int]: ID созданной записи или None в случае ошибки
+    """
+    fine_data = item['fine_data']
+    pdf_path = item['pdf_path']
+    pdf_url = item['pdf_url']
+    case_number = fine_data.get('caseNumber')
+    
+    logger.info(f"Starting PDF parsing for case number: {case_number}")
+    logger.debug(f"PDF path: {pdf_path}, Original URL: {pdf_url}")
+    
+    try:
+        # Парсим PDF файл
+        logger.info(f"Initializing parser for {case_number}")
+        parser = TrafficFinePDFParser()
+        parsed_data = parser.parse_file(Path(pdf_path))
+        
+        logger.info(f"Successfully parsed PDF for {case_number}")
+        logger.debug(f"Parsed data keys: {list(parsed_data.keys())}")
+        
+        # Конвертируем даты
+        commit_date = None
+        if fine_data.get('commitDate'):
+            commit_date = datetime.fromisoformat(fine_data['commitDate'].replace('Z', '+00:00'))
+        
+        decision_date = None
+        if fine_data.get('decisionDate'):
+            decision_date = datetime.fromisoformat(fine_data['decisionDate'].replace('Z', '+00:00'))
+        
+        # Создаем запись о штрафе с данными из API и парсинга
+        penalty_size = fine_data.get('penaltySize', 0)
+        # Проверяем, что penalty_size не является пустой строкой или дефисом
+        if penalty_size in ('-', '', None):
+            penalty_size = 0
+        
+        new_fine = TrafficFine(
+            prescription_number=fine_data.get('caseNumber'),
+            license_plate="",  # Будет заполнено позже из запроса
+            violation_datetime=commit_date or datetime.now(),
+            fine_amount=float(penalty_size),
+            discounted_amount=float(penalty_size) * 0.5,  # 50% скидка
+            issuing_department=fine_data.get('organ', {}).get('nameRu', ''),
+            violation_description=fine_data.get('penaltyMeasure', {}).get('nameRu', ''),
+            is_paid=(fine_data.get('status') == 'Оплачен'),
+            pdf_url=pdf_url,  # Сохраняем оригинальный URL вместо локального пути
+            
+            # Данные из парсера (если они есть)
+            vehicle_certificate=parsed_data.get('vehicle_certificate'),
+            vehicle_make_model=parsed_data.get('vehicle_make_model'),
+            vehicle_color=parsed_data.get('vehicle_color'),
+            violation_location=parsed_data.get('violation_location'),
+            detected_speed=parsed_data.get('detected_speed'),
+            allowed_speed=parsed_data.get('allowed_speed'),
+            speed_with_margin=parsed_data.get('speed_with_margin'),
+            device_name=parsed_data.get('device_name'),
+            device_serial=parsed_data.get('device_serial'),
+            certificate_number=parsed_data.get('certificate_number'),
+            certificate_date=parsed_data.get('certificate_date'),
+            certificate_valid_until=parsed_data.get('certificate_valid_until'),
+            owner_name=parsed_data.get('owner_name'),
+            owner_bin=parsed_data.get('owner_bin'),
+            owner_address=parsed_data.get('owner_address'),
+            issuing_officer=parsed_data.get('issuing_officer'),
+            article_code=parsed_data.get('article_code')
+        )
+        
+        # Если есть данные из парсера, обновляем некоторые поля
+        if parsed_data.get('fine_amount'):
+            new_fine.fine_amount = parsed_data.get('fine_amount')
+        if parsed_data.get('discounted_amount'):
+            new_fine.discounted_amount = parsed_data.get('discounted_amount')
+        if parsed_data.get('violation_description'):
+            new_fine.violation_description = parsed_data.get('violation_description')
+        
+        db_session.add(new_fine)
+        db_session.flush()  # Получаем ID без коммита
+        logger.info(f"Created fine record with ID: {new_fine.id} from parsed PDF")
+        logger.debug(f"Fine details - Plate: {new_fine.license_plate}, Amount: {new_fine.fine_amount}, URL: {new_fine.pdf_url}")
+        
+        return new_fine.id
+        
+    except Exception as e:
+        logger.error(f"Error parsing PDF and creating fine for case {case_number}: {str(e)}")
+        logger.debug(f"Exception details:", exc_info=True)
+        db_session.rollback()
+        return None
 
 
 def download_pdf(link: str, case_number: str) -> Optional[str]:

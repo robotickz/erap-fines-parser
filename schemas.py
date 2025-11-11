@@ -13,8 +13,8 @@ class FineBase(BaseModel):
     prescription_number: str = Field(..., min_length=15, max_length=15)
     license_plate: str = Field(..., min_length=5, max_length=20)
     violation_datetime: datetime
-    fine_amount: float = Field(..., gt=0)
-    discounted_amount: float = Field(..., gt=0)
+    fine_amount: float = Field(..., ge=0)  # Allow zero for paid fines
+    discounted_amount: float = Field(..., ge=0)  # Allow zero for paid fines
 
 class FineCreate(FineBase):
 
